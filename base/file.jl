@@ -448,30 +448,26 @@ function tempdir()
     end
 end
 
-const TEMP_CLEANUP_LIST = String[]
-const TEMP_CLEANUP_MAX = Ref(4096)
+const TEMP_CLEANUP = Dict{String,Bool}()
+const TEMP_CLEANUP_MAX = Ref(1024)
 
-function temp_cleanup_list_push!(path::AbstractString)
-    path = String(path)
-    if path ∉ TEMP_CLEANUP_LIST
-        if length(TEMP_CLEANUP_LIST) ≥ TEMP_CLEANUP_MAX[]
-            i = 1
-            while i ≤ length(TEMP_CLEANUP_LIST)
-                if !ispath(TEMP_CLEANUP_LIST[i])
-                    deleteat!(TEMP_CLEANUP_LIST, i)
-                else
-                    i += 1
-                end
-            end
-            TEMP_CLEANUP_MAX[] = max(4096, 2*length(TEMP_CLEANUP_MAX[]))
-        end
-        pushfirst!(TEMP_CLEANUP_LIST, path)
-    end
-    return path
+function temp_cleanup_later(path::AbstractString; asap::Bool=false)
+    TEMP_CLEANUP[path] = asap
+    length(TEMP_CLEANUP) ≥ TEMP_CLEANUP_MAX[] || return false
+    temp_cleanup_check()
+    TEMP_CLEANUP_MAX[] = max(1024, 2*length(TEMP_CLEANUP_MAX[]))
+    return true
 end
 
-function temp_cleanup()
-    for path in TEMP_CLEANUP_LIST
+function temp_cleanup_check()
+    for (path, asap) in keys(TEMP_CLEANUP)
+        asap && rm(path, recursive=true, force=true)
+        !ispath(path) && delete!(TEMP_CLEANUP, path)
+    end
+end
+
+function temp_cleanup_atexit()
+    for path in keys(TEMP_CLEANUP)
         rm(path, recursive=true, force=true)
     end
 end
@@ -496,7 +492,7 @@ end
 
 function mktemp(parent::AbstractString=tempdir(); cleanup::Bool=true)
     filename = _win_tempname(parent, UInt32(0))
-    cleanup && temp_cleanup_list_push!(filename)
+    cleanup && temp_cleanup_later(filename)
     return (filename, Base.open(filename, "r+"))
 end
 
@@ -531,7 +527,7 @@ function mktemp(parent::AbstractString=tempdir(); cleanup::Bool=true)
     b = joinpath(parent, temp_prefix * "XXXXXX")
     p = ccall(:mkstemp, Int32, (Cstring,), b) # modifies b
     systemerror(:mktemp, p == -1)
-    cleanup && temp_cleanup_list_push!(b)
+    cleanup && temp_cleanup_later(b)
     return (b, fdio(p, true))
 end
 
@@ -591,7 +587,7 @@ function mktempdir(parent::AbstractString=tempdir();
         end
         path = unsafe_string(ccall(:jl_uv_fs_t_path, Cstring, (Ptr{Cvoid},), req))
         ccall(:uv_fs_req_cleanup, Cvoid, (Ptr{Cvoid},), req)
-        cleanup && temp_cleanup_list_push!(path)
+        cleanup && temp_cleanup_later(path)
         return path
     finally
         Libc.free(req)
@@ -617,7 +613,7 @@ function mktemp(fn::Function, parent::AbstractString=tempdir())
         catch ex
             @error "mktemp cleanup" _group=:file exception=(ex, catch_backtrace())
             # might be possible to remove later
-            temp_cleanup_list_push!(tmpdir)
+            temp_cleanup_later(tmpdir, asap=true)
         end
     end
 end
@@ -640,7 +636,7 @@ function mktempdir(fn::Function, parent::AbstractString=tempdir();
         catch ex
             @error "mktempdir cleanup" _group=:file exception=(ex, catch_backtrace())
             # might be possible to remove later
-            temp_cleanup_list_push!(tmpdir)
+            temp_cleanup_later(tmpdir, asap=true)
         end
     end
 end
